@@ -1,4 +1,4 @@
-# DataJud Query Tool
+# DataJud : app de consultas
 
 App desktop Python (Linux) para consultar a [API Pública do DataJud (CNJ)](https://datajud-wiki.cnj.jus.br/api-publica/), parsear os resultados em Parquet, enriquecê-los com as [Tabelas Processuais Unificadas (TPU)](https://gateway.cloud.pje.jus.br/tpu) e classificar movimentos pela hierarquia TPU.
 
@@ -88,6 +88,13 @@ data/
 ├── tpu_assuntos_{ts}.parquet                     # TPU completa (5.601 assuntos)
 └── tpu_movimentos_{ts}.parquet                   # TPU completa (964 movimentos)
 ```
+
+> [!CAUTION]
+> Os dados de tempo do DATAJUD não são confiáveis. Há múltiplos formatos na base de dados (ISO, 14 digitos, etc.).
+
+
+> [!IMPORTANT]
+> Os dados de texto longo não são higienizados pelo DATAJUD, há muito ruído de encoding neles.
 
 ## Schemas
 
