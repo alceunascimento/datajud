@@ -95,6 +95,8 @@ def _exportar_processos(
         con.execute(f"""
             COPY (
                 SELECT
+                    id                                      AS id,
+                    id_local                                AS id_local,
                     numeroProcesso                          AS numero_processo,
                     classe.codigo                           AS classe_codigo,
                     classe.nome                             AS classe_nome,
@@ -136,8 +138,10 @@ def _exportar_assuntos(
         con.execute(f"""
             COPY (
                 SELECT
-                    numeroProcesso  AS numero_processo,
-                    a.codigo        AS assunto_codigo,
+                    id                       AS id,
+                    id_local                 AS id_local,
+                    numeroProcesso           AS numero_processo,
+                    a.codigo                 AS assunto_codigo,
                     REPLACE(a.nome, '"', '') AS assunto_nome
                 FROM read_json(
                     [{files_expr}],
@@ -165,6 +169,8 @@ def _exportar_movimentos(
         con.execute(f"""
             COPY (
                 SELECT
+                    id                                          AS id,
+                    id_local                                    AS id_local,
                     numeroProcesso                              AS numero_processo,
                     m.codigo                                    AS movimento_codigo,
                     REPLACE(m.nome, '"', '')                    AS movimento_nome,

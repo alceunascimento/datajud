@@ -48,8 +48,35 @@ def _normalize_date(value) -> Optional[str]:
     return s
 
 
-def _normalize_source(src: dict) -> dict:
-    """Normaliza campos de data dentro de _source antes de salvar."""
+def _build_id_local(src: dict) -> str:
+    """Constroi id_local no padrão CNJ: Tribunal_Classe_Grau_OrgaoJulgador_NumeroProcesso.
+
+    Onde qualquer componente estiver ausente, usa 'NA'. A chave primária para
+    individualizar processos é `id` (do _id do Elasticsearch); `id_local` é uma
+    tentativa de reconstrução padronizada para casos em que o `id` do DataJud
+    não siga a convenção do CNJ.
+    """
+    def _part(v) -> str:
+        if v is None or v == "":
+            return "NA"
+        return str(v).strip().replace("_", "-")  # proteger separador
+
+    tribunal = _part(src.get("tribunal"))
+    classe   = _part((src.get("classe") or {}).get("codigo"))
+    grau     = _part(src.get("grau"))
+    orgao    = _part((src.get("orgaoJulgador") or {}).get("codigo"))
+    numero   = _part(src.get("numeroProcesso"))
+    return f"{tribunal}_{classe}_{grau}_{orgao}_{numero}"
+
+
+def _normalize_hit(hit: dict) -> dict:
+    """Extrai _source, injeta id (do _id do ES) e id_local, normaliza datas."""
+    src = hit.get("_source", {}) or {}
+
+    # chave primária: vem do _id do Elasticsearch, nunca de dentro do _source
+    src["id"]       = hit.get("_id")
+    src["id_local"] = _build_id_local(src)
+
     # data de ajuizamento
     if "dataAjuizamento" in src:
         src["dataAjuizamento"] = _normalize_date(src["dataAjuizamento"])
@@ -92,7 +119,7 @@ def coletar(
     _log(f"[{tribunal_alias.upper()}] Total estimado: {total} processos")
 
     for hit in api.search(tribunal_alias, query_body, page_size=page_size):
-        src = _normalize_source(hit["_source"])
+        src = _normalize_hit(hit)
         buf.append(json.dumps(src, ensure_ascii=False))
 
         if len(buf) >= page_size:

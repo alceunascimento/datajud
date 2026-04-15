@@ -32,12 +32,15 @@ App desktop Python (Linux) para extrair dados processuais da API Pública do Dat
    │  3 Parquets            │
    └───────────┬────────────┘
                │ data/parsed/
-   ┌───────────▼────────────┐
-   │        tpu.py          │◄── API TPU (PJe Gateway)
-   │  enriquecer            │
-   │  baixar_completa       │
-   │  classificar_movimentos│
-   └────────────────────────┘
+   ┌───────────▼────────────────────────────────────────┐
+   │           subsistema TPU (4 módulos)                │
+   │                                                     │
+   │   tpu_client.py     — HTTP GET na API TPU           │◄── API TPU (PJe Gateway)
+   │   tpu_download.py   — dump cru das 3 tabelas        │
+   │   tpu_enrich.py     — LEFT JOIN → *_tpu.parquet     │
+   │   tpu_classify.py   — booleanos → *_class.parquet   │
+   │   tpu.py            — facade (API pública estável)  │
+   └─────────────────────────────────────────────────────┘
 ```
 
 ## Módulos
@@ -89,9 +92,14 @@ Orquestra a coleta e persiste em disco sem explodir RAM.
 **Fluxo:**
 1. `api.count()` → log do total estimado
 2. `api.search()` → stream de hits
-3. Para cada hit: `_normalize_source()` normaliza datas, serializa JSON
+3. Para cada hit: `_normalize_hit()` extrai `_id`, constrói `id_local`, normaliza datas, serializa JSON
 4. A cada `page_size` hits: `_flush()` grava NDJSON em `data/raw/`
 5. Ao final: flush do buffer restante
+
+**Chave primária `id` e `id_local`:**
+- `id` ← `hit["_id"]` do Elasticsearch (PK do índice DataJud). Necessário porque o `numero_processo` do CNJ se mantém estável entre instâncias — 1º grau, apelação e cumprimento compartilham o mesmo número.
+- `id_local` é reconstruído pelo ingestor no padrão canônico `{tribunal}_{classe_codigo}_{grau}_{orgao_julgador_codigo}_{numero_processo}`, com `NA` onde faltar componente e `_` escapado para `-` dentro dos valores. Serve como fallback legível quando o `id` do tribunal não segue a convenção CNJ.
+- Ambos são propagados para os 3 parquets no parser e preservados nos `_tpu` e `_class`.
 
 **Normalização de datas (`_normalize_date`):**
 O DataJud retorna datas em formatos inconsistentes. A função usa pares `(regex, strptime_format)` para identificar e converter todos para `YYYY-MM-DDTHH:MM:SS`. Regex é obrigatório — `strptime` aceita 1 dígito em `%M/%S` e causa parse errado em datas numéricas de 12 dígitos.
@@ -117,20 +125,25 @@ Converte NDJSON brutos em 3 Parquets usando DuckDB.
 
 **Saída:** 3 arquivos `data/parsed/{tipo}_{YYYYMMDDHHMMSS}.parquet`
 
-### `tpu.py`
-Três responsabilidades: enriquecimento com JOIN, download completo e classificação de movimentos.
+### Subsistema TPU (`tpu_*.py` + `tpu.py`)
+
+O subsistema TPU está dividido em 4 módulos por responsabilidade + 1 facade. `cli.py` e `gui.py` consomem apenas via `import tpu as datajud_tpu` — a API pública é `enriquecer`, `baixar_completa`, `classificar_movimentos`.
+
+| Módulo | Responsabilidade | API pública |
+|--------|------------------|-------------|
+| `tpu_client.py`   | HTTP GET na API TPU do CNJ | `baixar(tipo, progress)` |
+| `tpu_download.py` | Dump cru das 3 tabelas TPU em Parquet | `baixar_completa(out_dir)` |
+| `tpu_enrich.py`   | LEFT JOIN dos parquets parseados com TPU | `enriquecer(parsed_dir)`, `encontrar_parquets_base(parsed_dir)` |
+| `tpu_classify.py` | Classificação por árvore hierárquica | `classificar_movimentos(parsed_dir)` |
+| `tpu.py`          | Facade — reexporta as 3 funções públicas | — |
 
 **API TPU:** `https://gateway.cloud.pje.jus.br/tpu`
 - Sem parâmetros: retorna tabela completa
 - `?codigo=N`: retorna item e seus descendentes na hierarquia
 
-**Peculiaridade:** o endpoint de movimentos usa `id` como PK, não `cod_item` (usado em classes e assuntos). `_registrar_tpu()` normaliza `id → cod_item` antes do JOIN.
+**Peculiaridade:** o endpoint de movimentos usa `id` como PK, não `cod_item` (usado em classes e assuntos). `tpu_enrich._registrar_tpu()` normaliza `id → cod_item` antes do JOIN.
 
-| Função | Descrição |
-|--------|-----------|
-| `enriquecer(parsed_dir)` | Localiza Parquets mais recentes, baixa TPU, LEFT JOIN, salva `*_tpu.parquet` |
-| `baixar_completa(out_dir)` | Baixa TPU completa (todas colunas) sem join → `data/tpu_{tipo}_{ts}.parquet` |
-| `classificar_movimentos(parsed_dir)` | Classifica movimentos por posição na árvore TPU → `*_class.parquet` |
+**Reuso entre módulos:** `tpu_classify` depende de `tpu_enrich.encontrar_parquets_base()` (localização do parquet de movimentos base) e de `tpu_client.baixar()` (fallback quando não há `tpu_movimentos_*.parquet` local).
 
 #### Classificação de movimentos
 
@@ -203,7 +216,7 @@ Interface Tkinter com polling thread-safe.
 API DataJud
     │
     ▼ hits JSON (stream, page_size=1000)
-ingestor._normalize_source()         ← normaliza datas aqui
+ingestor._normalize_hit()            ← extrai id, constrói id_local, normaliza datas
     │
     ▼ NDJSON normalizado
 data/raw/datajud_{tribunal}_{ts}_p{n:04d}.ndjson
@@ -231,10 +244,14 @@ data/tpu_movimentos_{ts}.parquet
 
 ## Schemas dos Parquets
 
+**Chave primária em todos os parquets:** `id` (PK do DataJud, vem do `_id` do Elasticsearch). `id_local` é a versão reconstruída no padrão canônico `{tribunal}_{classe}_{grau}_{orgao}_{numero}`. `numero_processo` **não** é único entre instâncias — nunca use como chave.
+
 ### processos_{ts}.parquet
 
 | Coluna | Tipo | Fonte |
 |--------|------|-------|
+| `id` | VARCHAR | `hit._id` (PK do DataJud) |
+| `id_local` | VARCHAR | ingestor, padrão CNJ |
 | `numero_processo` | VARCHAR | `_source.numeroProcesso` |
 | `classe_codigo` | INTEGER | `_source.classe.codigo` |
 | `classe_nome` | VARCHAR | `_source.classe.nome` |
@@ -255,6 +272,8 @@ data/tpu_movimentos_{ts}.parquet
 
 | Coluna | Tipo |
 |--------|------|
+| `id` | VARCHAR (FK → processos.id) |
+| `id_local` | VARCHAR |
 | `numero_processo` | VARCHAR |
 | `assunto_codigo` | INTEGER |
 | `assunto_nome` | VARCHAR |
@@ -263,6 +282,8 @@ data/tpu_movimentos_{ts}.parquet
 
 | Coluna | Tipo |
 |--------|------|
+| `id` | VARCHAR (FK → processos.id) |
+| `id_local` | VARCHAR |
 | `numero_processo` | VARCHAR |
 | `movimento_codigo` | INTEGER |
 | `movimento_nome` | VARCHAR |

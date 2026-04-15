@@ -92,16 +92,22 @@ data/
 > [!CAUTION]
 > Os dados de tempo do DATAJUD não são confiáveis. Há múltiplos formatos na base de dados (ISO, 14 digitos, etc.).
 
+> [!WARNING]
+> Como o CNJ definiu que o numero processual único se mantém na primeira instância, nas apelações e nos cumprimentos de sentença, não há como individualizar os processos somente pelo _`numero_processo`, é preciso utilizar a variável `id` que é uma `text/keyword` que, pelo Glossário do DATAJUD é : "Identificador da origem do processo no Datajud - Chave Tribunal_Classe_Grau_OrgaoJulgador_NumeroProcesso". Com isto, é possível individualizar um mesmo processo como "TJPR_G1_00000000000000" e "TJPR_G2_000000000000000". Contudo, é raro que o dado tenha conformidade com o padrão do CNJ, na maioria dos casos existe apenas o "Tribunal" o "Grau" e o "NumeroProceso".
 
 > [!IMPORTANT]
 > Os dados de texto longo não são higienizados pelo DATAJUD, há muito ruído de encoding neles.
 
 ## Schemas
 
+**Chave primária:** `id` (vem do `_id` do Elasticsearch DataJud). Em paralelo, o pipeline gera `id_local` reconstruído no padrão canônico `{tribunal}_{classe_codigo}_{grau}_{orgao_julgador_codigo}_{numero_processo}` (com `NA` onde faltar). Ambos os campos estão em **todos os parquets** (processos, assuntos, movimentos, versões `_tpu` e `_class`). Ver WARNING acima sobre por que `numero_processo` não serve como PK.
+
 ### processos
 
 | Coluna | Tipo |
 |--------|------|
+| `id` | VARCHAR (PK) |
+| `id_local` | VARCHAR |
 | `numero_processo` | VARCHAR |
 | `classe_codigo / nome` | INTEGER / VARCHAR |
 | `sistema_codigo / nome` | INTEGER / VARCHAR |
@@ -118,6 +124,8 @@ data/
 
 | Coluna | Tipo |
 |--------|------|
+| `id` | VARCHAR (FK → processos.id) |
+| `id_local` | VARCHAR |
 | `numero_processo` | VARCHAR |
 | `assunto_codigo` | INTEGER |
 | `assunto_nome` | VARCHAR |
@@ -126,6 +134,8 @@ data/
 
 | Coluna | Tipo |
 |--------|------|
+| `id` | VARCHAR (FK → processos.id) |
+| `id_local` | VARCHAR |
 | `numero_processo` | VARCHAR |
 | `movimento_codigo` | INTEGER |
 | `movimento_nome` | VARCHAR |
@@ -183,17 +193,23 @@ Um movimento recebe `True` se ele próprio **ou qualquer ancestral seu** na árv
 
 ```
 datajud/
-├── main.py          # entrypoint + logging para arquivo
-├── config.py        # constantes, paths, 91 tribunais, URLs das APIs
-├── api.py           # HTTP client: search_after, backoff exponencial
-├── query.py         # builders DSL Elasticsearch
-├── ingestor.py      # coleta + normalização de datas + flush NDJSON
-├── parser.py        # DuckDB: NDJSON → 3 Parquets (com UNNEST)
-├── tpu.py           # enriquecimento TPU + download completo + classificação
+├── main.py          # entrypoint (CLI vs GUI) + logging para arquivo
+├── cli.py           # argparse → orquestra ingestor/parser/tpu
 ├── gui.py           # Tkinter GUI + thread safety via poll loop
+├── config.py        # constantes, paths, 91 tribunais, URLs das APIs
+├── api.py           # HTTP client DataJud: search_after, backoff exponencial
+├── query.py         # builders DSL Elasticsearch
+├── ingestor.py      # coleta + id/id_local + normalização de datas + flush NDJSON
+├── parser.py        # DuckDB: NDJSON → 3 Parquets (com UNNEST)
+├── tpu.py           # facade: reexporta enriquecer/baixar_completa/classificar
+├── tpu_client.py    # HTTP GET na API TPU (PJe Gateway)
+├── tpu_download.py  # dump cru das 3 tabelas TPU em Parquet
+├── tpu_enrich.py    # LEFT JOIN parquets × TPU → *_tpu.parquet
+├── tpu_classify.py  # 9 booleanos via árvore hierárquica → *_class.parquet
 ├── requirements.txt
 ├── docs/
 │   ├── arquitetura.md   # documentação técnica completa
+│   ├── cli.md           # referência da linha de comando
 │   └── status.md        # estado atual, bugs corrigidos, pendências
 ├── data/
 │   ├── raw/
