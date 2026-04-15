@@ -12,7 +12,9 @@ from typing import Generator
 
 import requests
 
-from config import BASE_URL, HEADERS, PAGE_SIZE
+from config import BASE_URL, HEADERS, MAX_RETRIES, PAGE_SIZE, REQUEST_TIMEOUT
+
+_RETRY_STATUS = {429, 500, 502, 503, 504}
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +60,9 @@ def search(
         page += 1
         log.debug("[%s] página %d (after=%s)", tribunal_alias, page, after)
 
+        t0 = time.monotonic()
         resp = _post(tribunal_alias, body)
+        elapsed = time.monotonic() - t0
         hits = resp["hits"]["hits"]
 
         if not hits:
@@ -69,30 +73,37 @@ def search(
             yield hit
 
         after = hits[-1]["sort"]
-        log.info("[%s] pág %d → %d hits", tribunal_alias, page, len(hits))
+        log.info(
+            "[%s] pág %d → %d hits (size=%d, %.1fs)",
+            tribunal_alias, page, len(hits), page_size, elapsed,
+        )
         time.sleep(0.5)  # throttling defensivo
 
 
-def _post(tribunal_alias: str, body: dict, max_retries: int = 6) -> dict:
-    """POST com backoff exponencial em 429/503. Erros 4xx não são retried."""
+def _post(tribunal_alias: str, body: dict, max_retries: int = MAX_RETRIES) -> dict:
+    """POST com backoff exponencial em 429/5xx/timeout. Erros 4xx (≠429) propagam."""
     url = _endpoint(tribunal_alias)
+    size = body.get("size", "?")
     for attempt in range(max_retries + 1):
         try:
-            r = requests.post(url, headers=HEADERS, json=body, timeout=60)
+            t0 = time.monotonic()
+            r = requests.post(url, headers=HEADERS, json=body, timeout=REQUEST_TIMEOUT)
+            elapsed = time.monotonic() - t0
 
-            # 4xx = erro do cliente, não adianta retry
-            if 400 <= r.status_code < 500 and r.status_code not in (429,):
+            # 4xx ≠ 429 = erro do cliente, não adianta retry
+            if 400 <= r.status_code < 500 and r.status_code != 429:
                 log.error(
-                    "HTTP %d em %s — erro do cliente, sem retry. Body: %s",
-                    r.status_code, tribunal_alias, r.text[:500],
+                    "HTTP %d em %s (size=%s, %.1fs) — erro do cliente. Body: %s",
+                    r.status_code, tribunal_alias, size, elapsed, r.text[:500],
                 )
                 r.raise_for_status()
 
-            if r.status_code in (429, 503):
-                wait = 2 ** attempt
+            if r.status_code in _RETRY_STATUS:
+                wait = min(2 ** attempt, 60)
                 log.warning(
-                    "HTTP %d em %s — aguardando %ds (tentativa %d/%d)",
-                    r.status_code, tribunal_alias, wait, attempt + 1, max_retries,
+                    "HTTP %d em %s (size=%s, %.1fs) — aguardando %ds (tentativa %d/%d)",
+                    r.status_code, tribunal_alias, size, elapsed, wait,
+                    attempt + 1, max_retries,
                 )
                 time.sleep(wait)
                 continue
@@ -101,13 +112,16 @@ def _post(tribunal_alias: str, body: dict, max_retries: int = 6) -> dict:
             return r.json()
 
         except requests.HTTPError:
-            raise  # 4xx já logado acima, propaga imediatamente
+            raise
         except requests.RequestException as exc:
             if attempt >= max_retries:
                 log.error("Falha após %d tentativas em %s: %s", max_retries, tribunal_alias, exc)
                 raise
-            wait = 2 ** attempt
-            log.warning("Erro de rede (%s) — aguardando %ds...", exc, wait)
+            wait = min(2 ** attempt, 60)
+            log.warning(
+                "Erro de rede em %s (size=%s): %s — aguardando %ds (tentativa %d/%d)",
+                tribunal_alias, size, exc, wait, attempt + 1, max_retries,
+            )
             time.sleep(wait)
 
     raise RuntimeError(f"_post falhou após {max_retries} retentativas ({tribunal_alias})")

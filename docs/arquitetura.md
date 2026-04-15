@@ -7,11 +7,11 @@ App desktop Python (Linux) para extrair dados processuais da API Pública do Dat
 ```
 ┌──────────────────────────────────────────────────────┐
 │                     GUI (Tkinter)                    │
-│  Abas: Processo | Classe | Assunto | Órgão | Combinada
-│  Painel direito: Tribunais (filtro + multiselect) + Datas
+│  Abas: Processo | Classe | Assunto | Órgão | Município | Combinada
+│  Painel direito: Tribunais (filtro + multiselect) + Datas + Page size
 │                                                      │
 │  Linha 1: ▶ EXECUTAR  ⚙ PARSEAR  ★ ENRIQUECER TPU  ⚡ CLASSIFICAR MOV.
-│  Linha 2: ⬇ BAIXAR TPU COMPLETA  🗑 LIMPAR LOG  📂 Abrir data/
+│  Linha 2: ⬇ BAIXAR TPU COMPLETA  👨‍⚖ MAGISTRADOS TJPR  🗑 LIMPAR LOG  📂 Abrir data/
 └──────────────┬───────────────────────────────────────┘
                │ threads daemon
    ┌───────────▼────────────┐
@@ -41,6 +41,11 @@ App desktop Python (Linux) para extrair dados processuais da API Pública do Dat
    │   tpu_classify.py   — booleanos → *_class.parquet   │
    │   tpu.py            — facade (API pública estável)  │
    └─────────────────────────────────────────────────────┘
+
+   ┌─────────────────────────────────────────────────────┐
+   │   magistrados.py    — TJPR magistratura (GET +      │◄── portal.tjpr.jus.br
+   │                       flatten + 2 Parquets)          │
+   └─────────────────────────────────────────────────────┘
 ```
 
 ## Módulos
@@ -51,7 +56,7 @@ Entrypoint. Configura logging para arquivo (`logs/datajud.log`) e lança a GUI.
 ### `config.py`
 Todas as constantes do projeto:
 - Paths: `BASE_DIR`, `DATA_DIR`, `RAW_DIR`, `PARSED_DIR`, `LOGS_DIR`
-- API DataJud: `API_KEY`, `BASE_URL`, `HEADERS`, `PAGE_SIZE`
+- API DataJud: `API_KEY`, `BASE_URL`, `HEADERS`, `PAGE_SIZE`, `REQUEST_TIMEOUT`, `MAX_RETRIES`
 - API TPU: `TPU_BASE_URL`, `TPU_ENDPOINTS`
 - `TRIBUNAIS`: dict `{sigla → alias}` com 91 tribunais
 
@@ -61,13 +66,16 @@ Cliente HTTP de baixo nível para a API DataJud.
 | Função | Descrição |
 |--------|-----------|
 | `count(alias, body)` | Retorna total de hits sem baixar dados (`track_total_hits`) |
-| `search(alias, body, page_size)` | Generator paginado via `search_after` |
-| `_post(alias, body)` | POST com backoff exponencial em 429/503; 4xx falha imediato |
+| `search(alias, body, page_size)` | Generator paginado via `search_after`, loga duração e size |
+| `_post(alias, body)` | POST com backoff em 429/500/502/503/504 + erros de rede; 4xx (≠429) falha imediato |
 
 **Decisões de design:**
 - `search_after` com sort por `@timestamp` apenas — `_id` não tem `doc_values` no índice DataJud e causa HTTP 400.
-- 4xx não é retried (erro do cliente); 429/503 → backoff `2^n` até 6 tentativas.
+- Retry cobre 429 **e** toda a faixa 5xx (500/502/503/504) + `RequestException`. O servidor DataJud devolve 504 com frequência em páginas grandes — retry é obrigatório.
+- Backoff `2^n` capado em 60s, até `MAX_RETRIES` tentativas (default 6).
+- `REQUEST_TIMEOUT=300s` por POST — páginas de 10k hits podem ultrapassar 60s.
 - 500ms de sleep entre páginas (throttling defensivo).
+- Logs trazem `size`, duração (`%.1fs`) e tentativa atual para diagnóstico.
 
 ### `query.py`
 Builders de Elasticsearch DSL. Todos retornam `dict` pronto para POST.
@@ -82,7 +90,9 @@ Builders de Elasticsearch DSL. Todos retornam `dict` pronto para POST.
 | `por_assuntos(cods)` | `nested` terms em `assuntos.codigo` | campo nested |
 | `por_orgao(cod)` | `match` em `orgaoJulgador.codigo` | aceita `date_gte/lt` |
 | `por_orgaos(cods)` | `terms` em `orgaoJulgador.codigo` | aceita `date_gte/lt` |
-| `combinada(...)` | `bool/must` com qualquer combinação | mínimo 1 filtro obrigatório |
+| `por_municipio(cod)` | `match` em `orgaoJulgador.codigoMunicipioIBGE` | aceita `date_gte/lt` |
+| `por_municipios(cods)` | `terms` em `orgaoJulgador.codigoMunicipioIBGE` | aceita `date_gte/lt` |
+| `combinada(...)` | `bool/must` com qualquer combinação (inclui `municipios`) | mínimo 1 filtro obrigatório |
 
 **Regra crítica:** `assuntos` e `movimentos` são campos `nested` no índice ES. `match` direto ignora a aninhação e retorna falso-positivos — sempre usar `nested` query.
 
@@ -145,6 +155,22 @@ O subsistema TPU está dividido em 4 módulos por responsabilidade + 1 facade. `
 
 **Reuso entre módulos:** `tpu_classify` depende de `tpu_enrich.encontrar_parquets_base()` (localização do parquet de movimentos base) e de `tpu_client.baixar()` (fallback quando não há `tpu_movimentos_*.parquet` local).
 
+### `magistrados.py`
+
+Coleta independente da base de magistrados do TJPR (fonte: `portal.tjpr.jus.br/magistratura/api/listaCompleta`). Não depende de coleta DataJud prévia.
+
+**Fluxo:**
+1. GET com retry (3×, 120s timeout, header `Accept-Encoding: identity` — mesma configuração do R script original).
+2. Parse da estrutura aninhada: `sede → comarcas → unidadesJudiciais` e `sede.juizesSubstitutos`.
+3. Duas views tabulares em `pandas.DataFrame`:
+   - `flatten_unidades()` → toda unidade judiciária (relação comarca/entrância/seção).
+   - `flatten_magistrados()` → uma linha por juiz (perfil `titular` da unidade ou `substituto` da sede).
+4. Regex extrai cidade do foro em Regiões Metropolitanas (`Comarca da Região Metropolitana de X - Foro Central/Regional de Y`).
+5. **`dt_referencia` (YYYY-MM-DD) gravada em toda linha** — magistrados mudam de comarca/entrância; a data da coleta permite análise intertemporal.
+6. Persiste dois Parquets (zstd) em `data/parsed/`: `magistrados_tjpr_{ts}.parquet` e `unidades_tjpr_{ts}.parquet`.
+
+**API pública:** `baixar(out_dir, progress_cb)` → `{"magistrados": Path, "unidades": Path}`.
+
 #### Classificação de movimentos
 
 A árvore TPU de movimentos tem 6 níveis. Dois nós raiz definem os ramos principais:
@@ -196,6 +222,9 @@ Estrutura: `argparse` com subcomandos → mesmas funções que a GUI chama.
 | `enriquecer` | `tpu.enriquecer()` |
 | `classificar` | `tpu.classificar_movimentos()` |
 | `baixar-tpu` | `tpu.baixar_completa()` |
+| `magistrados-tjpr` | `magistrados.baixar()` |
+
+Aceita `--tipo municipio` (usando `--codigos IBGE`) e `--municipios` no `--tipo combinada`.
 
 **Despacho em `main.py`:** `len(sys.argv) > 1` → CLI; caso contrário → GUI. Tkinter nunca é importado em modo CLI.
 
@@ -209,6 +238,10 @@ Interface Tkinter com polling thread-safe.
 - Flag `self._enable_after_parse` lido pelo poll loop, que habilita em lote todos os botões em `self._btns_post_parse` — não usa `after()` chamado de thread (não confiável no Linux)
 
 **Botões habilitados após parse:** `★ ENRIQUECER TPU` e `⚡ CLASSIFICAR MOV.` — ambos gerenciados pela lista `_btns_post_parse`.
+
+**Combobox "Processos por página":** 1000 / 5000 / 10000 (máximo aceito pela API DataJud). O valor é passado a `ingestor.coletar_multiplos(page_size=...)`. Default 1000 — conservador, menor pressão de RAM no parse e menos risco de 504 em tribunais lentos.
+
+**Botão `👨‍⚖ MAGISTRADOS TJPR`:** invoca `magistrados.baixar()` em thread daemon; não depende de coleta DataJud prévia.
 
 ## Fluxo de dados completo
 
@@ -240,6 +273,15 @@ API TPU (download completo, independente)
 data/tpu_classes_{ts}.parquet
 data/tpu_assuntos_{ts}.parquet
 data/tpu_movimentos_{ts}.parquet
+
+Portal TJPR Magistratura (download independente)
+    │
+    ▼ GET /magistratura/api/listaCompleta
+magistrados.py: flatten + dt_referencia
+    │
+    ▼
+data/parsed/magistrados_tjpr_{ts}.parquet
+data/parsed/unidades_tjpr_{ts}.parquet
 ```
 
 ## Schemas dos Parquets
@@ -320,3 +362,36 @@ Todas as colunas de `movimentos_{ts}.parquet` mais:
 | `julgamento_sem_resolucao_do_merito` | BOOLEAN | qualquer ancestral é código 218 |
 | `oficial_justica_devolucao_mandado` | BOOLEAN | qualquer ancestral é código 106 |
 | `oficial_justica_recebimento_mandado` | BOOLEAN | qualquer ancestral é código 985 |
+
+### magistrados_tjpr_{ts}.parquet
+
+Gerado pelo módulo `magistrados.py` — independente do pipeline DataJud.
+
+| Coluna | Tipo | Observação |
+|--------|------|------------|
+| `dt_referencia` | VARCHAR | YYYY-MM-DD; data da coleta (intertemporal) |
+| `comarca_sede_raw` | VARCHAR | string original quando a sede é uma RM |
+| `comarca_sede` | VARCHAR | nome da RM extraído via regex (UPPER) |
+| `comarca_nome_raw` | VARCHAR | string original em foros regionais |
+| `comarca_nome` | VARCHAR | cidade do foro extraída via regex |
+| `comarca_id` | INTEGER | |
+| `unidade_nome` | VARCHAR | `"sem informacao de vinculo"` para substitutos |
+| `magistrado_id` | INTEGER | preenchido só para `substituto` |
+| `magistrado_nome` | VARCHAR | |
+| `perfil` | VARCHAR | `titular` ou `substituto` |
+
+### unidades_tjpr_{ts}.parquet
+
+Mesma coleta — view por unidade judiciária.
+
+| Coluna | Tipo |
+|--------|------|
+| `dt_referencia` | VARCHAR |
+| `comarca_sede_raw` / `comarca_sede` | VARCHAR |
+| `comarca_nome_raw` / `comarca_nome` | VARCHAR |
+| `comarca_id` | INTEGER |
+| `comarca_entrancia` | VARCHAR |
+| `unidade_id` / `unidade_nome` | INTEGER / VARCHAR |
+| `unidade_email` | VARCHAR |
+| `unidade_id_domus` | VARCHAR |
+| `secao_judiciaria` | VARCHAR |

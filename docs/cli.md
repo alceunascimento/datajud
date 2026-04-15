@@ -31,7 +31,8 @@ python main.py coletar --tipo TIPO [opções] --tribunais TRB [TRB ...]
 | `classe` | `--codigos C1 C2 ...` | sim |
 | `assunto` | `--codigos C1 C2 ...` | sim |
 | `orgao` | `--codigos C1 C2 ...` | sim |
-| `combinada` | `--classes`, `--assuntos`, `--orgaos`, `--numeros` (qualquer combinação) | `--csv` → numeros |
+| `municipio` | `--codigos IBGE1 IBGE2 ...` | sim |
+| `combinada` | `--classes`, `--assuntos`, `--orgaos`, `--municipios`, `--numeros` (qualquer combinação) | `--csv` → numeros |
 
 **`--tribunais`** (obrigatório): siglas em maiúscula ou minúscula, ou aliases diretos.
 ```
@@ -77,6 +78,19 @@ Baixa as tabelas TPU completas (classes, assuntos, movimentos) para `data/`.
 python main.py baixar-tpu
 ```
 
+### `magistrados-tjpr`
+
+Baixa a base de magistrados + unidades judiciárias do TJPR (fonte: `portal.tjpr.jus.br/magistratura/api/listaCompleta`). Gera dois Parquets em `data/parsed/`:
+
+- `magistrados_tjpr_{ts}.parquet` — titulares + substitutos
+- `unidades_tjpr_{ts}.parquet` — unidades judiciárias com comarca/entrância
+
+Cada linha inclui `dt_referencia` (data da coleta) para acompanhamento intertemporal de remoções e promoções.
+
+```
+python main.py magistrados-tjpr
+```
+
 ---
 
 ## Exemplos práticos
@@ -107,6 +121,20 @@ $PYTHON $APP coletar --tipo combinada \
     --assuntos 6177 \
     --tribunais TJPR \
     --de 2023-01-01
+
+# por município (código IBGE — Curitiba = 4106902)
+$PYTHON $APP coletar --tipo municipio \
+    --codigos 4106902 \
+    --tribunais TJPR \
+    --de 2024-01-01
+
+# combinada com município
+$PYTHON $APP coletar --tipo combinada \
+    --classes 436 --municipios 4106902 \
+    --tribunais TJPR
+
+# base de magistrados do TJPR (independente)
+$PYTHON $APP magistrados-tjpr
 
 # pipeline completo em sequência
 $PYTHON $APP coletar --tipo classe --codigos 436 --tribunais TJPR

@@ -22,7 +22,9 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-PAGE_SIZE = 1000   # hits por página (search_after)
+PAGE_SIZE = 1000          # hits por página (search_after)
+REQUEST_TIMEOUT = 300     # segundos; páginas grandes (10k) podem demorar > 60s
+MAX_RETRIES = 6           # tentativas em 429/502/503/504/erros de rede
 
 # API TPU — PJe Cloud Gateway (https://gateway.cloud.pje.jus.br/tpu)
 # Sem parâmetros: retorna tabela completa

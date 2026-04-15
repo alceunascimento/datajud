@@ -17,6 +17,7 @@ from pathlib import Path
 
 import query as Q
 import ingestor
+import magistrados as datajud_magistrados
 import parser as datajud_parser
 import tpu as datajud_tpu
 from config import LOGS_DIR, PARSED_DIR, RAW_DIR, TRIBUNAIS
@@ -113,10 +114,10 @@ tipos de query:
     )
     p_col.add_argument(
         "--tipo",
-        choices=["processo", "classe", "assunto", "orgao", "combinada"],
+        choices=["processo", "classe", "assunto", "orgao", "municipio", "combinada"],
         required=True,
         metavar="TIPO",
-        help="processo | classe | assunto | orgao | combinada",
+        help="processo | classe | assunto | orgao | municipio | combinada",
     )
     p_col.add_argument("--numeros",  nargs="+", metavar="NUM",
                        help="Número(s) CNJ de processo (20 dígitos)")
@@ -128,6 +129,8 @@ tipos de query:
                        help="[combinada] Código(s) de assunto")
     p_col.add_argument("--orgaos",   nargs="+", type=int, metavar="COD",
                        help="[combinada] Código(s) de órgão julgador")
+    p_col.add_argument("--municipios", nargs="+", type=int, metavar="COD",
+                       help="[combinada] Código(s) IBGE de município")
     p_col.add_argument("--csv", type=Path, metavar="ARQUIVO",
                        help="CSV com códigos/números na 1ª coluna (substitui --codigos/--numeros)")
     p_col.add_argument("--tribunais", nargs="+", required=True, metavar="TRB",
@@ -161,6 +164,12 @@ tipos de query:
         help="Baixa tabelas TPU completas (classes/assuntos/movimentos) para data/",
     )
 
+    # ── magistrados-tjpr ──────────────────────────────────────────────────────
+    sub.add_parser(
+        "magistrados-tjpr",
+        help="Baixa base de magistrados + unidades do TJPR em Parquet",
+    )
+
     return main_parser
 
 
@@ -190,6 +199,11 @@ def _dispatch(args: argparse.Namespace) -> None:
         result = datajud_tpu.baixar_completa()
         for k, p in result.items():
             logging.info("TPU completa: %s → %s", k, p)
+
+    elif cmd == "magistrados-tjpr":
+        result = datajud_magistrados.baixar(out_dir=PARSED_DIR)
+        for k, p in result.items():
+            logging.info("Magistrados TJPR: %s → %s", k, p)
 
 
 # ── comando coletar ───────────────────────────────────────────────────────────
@@ -235,18 +249,27 @@ def _cmd_coletar(args: argparse.Namespace) -> None:
         query_body = (Q.por_orgao(cods[0], date_gte=date_gte, date_lt=date_lt) if len(cods) == 1
                       else Q.por_orgaos(cods, date_gte=date_gte, date_lt=date_lt))
 
+    elif tipo == "municipio":
+        cods = [int(v) for v in csv_values] if csv_values else (args.codigos or [])
+        if not cods:
+            _die("--tipo municipio requer --codigos ou --csv (código IBGE)")
+        query_body = (Q.por_municipio(cods[0], date_gte=date_gte, date_lt=date_lt) if len(cods) == 1
+                      else Q.por_municipios(cods, date_gte=date_gte, date_lt=date_lt))
+
     elif tipo == "combinada":
-        nums     = csv_values if csv_values else (args.numeros or [])
-        classes  = args.classes  or []
-        assuntos = args.assuntos or []
-        orgaos   = args.orgaos   or []
-        if not any([nums, classes, assuntos, orgaos]):
+        nums       = csv_values if csv_values else (args.numeros or [])
+        classes    = args.classes    or []
+        assuntos   = args.assuntos   or []
+        orgaos     = args.orgaos     or []
+        municipios = args.municipios or []
+        if not any([nums, classes, assuntos, orgaos, municipios]):
             _die("--tipo combinada requer pelo menos um filtro")
         query_body = Q.combinada(
-            numeros=nums     or None,
-            classes=classes  or None,
-            assuntos=assuntos or None,
-            orgaos=orgaos    or None,
+            numeros=nums       or None,
+            classes=classes    or None,
+            assuntos=assuntos  or None,
+            orgaos=orgaos      or None,
+            municipios=municipios or None,
             date_gte=date_gte,
             date_lt=date_lt,
         )

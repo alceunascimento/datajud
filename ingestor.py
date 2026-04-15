@@ -116,17 +116,26 @@ def coletar(
     _log(f"[{tribunal_alias.upper()}] Iniciando coleta...")
 
     total = api.count(tribunal_alias, query_body)
-    _log(f"[{tribunal_alias.upper()}] Total estimado: {total} processos")
+    _log(f"[{tribunal_alias.upper()}] Total estimado: {total} processos (page_size={page_size})")
 
+    coletados = 0
+    t_start = datetime.now()
     for hit in api.search(tribunal_alias, query_body, page_size=page_size):
         src = _normalize_hit(hit)
         buf.append(json.dumps(src, ensure_ascii=False))
+        coletados += 1
 
         if len(buf) >= page_size:
             page += 1
             path = _flush(buf, out_dir, tribunal_alias, page, ts)
             arquivos.append(path)
-            _log(f"[{tribunal_alias.upper()}] pág {page} → {len(buf)} registros → {path.name}")
+            pct = (coletados / total * 100) if total else 0
+            elapsed = (datetime.now() - t_start).total_seconds()
+            rate = coletados / elapsed if elapsed > 0 else 0
+            _log(
+                f"[{tribunal_alias.upper()}] pág {page} → {len(buf)} reg → "
+                f"{coletados}/{total} ({pct:.1f}%, {rate:.0f} reg/s) → {path.name}"
+            )
             buf.clear()
 
     # flush do restante

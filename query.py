@@ -76,6 +76,24 @@ def por_orgaos(codigos: list[int], date_gte: Optional[str] = None, date_lt: Opti
     )
 
 
+# ── Por município (IBGE) ──────────────────────────────────────────────────────
+
+def por_municipio(codigo: int, date_gte: Optional[str] = None, date_lt: Optional[str] = None) -> dict:
+    """Município único pelo código IBGE (orgaoJulgador.codigoMunicipioIBGE)."""
+    return _bool(
+        must=[{"match": {"orgaoJulgador.codigoMunicipioIBGE": codigo}}],
+        date_gte=date_gte, date_lt=date_lt,
+    )
+
+
+def por_municipios(codigos: list[int], date_gte: Optional[str] = None, date_lt: Optional[str] = None) -> dict:
+    """Múltiplos municípios por código IBGE."""
+    return _bool(
+        must=[{"terms": {"orgaoJulgador.codigoMunicipioIBGE": codigos}}],
+        date_gte=date_gte, date_lt=date_lt,
+    )
+
+
 # ── Query combinada ───────────────────────────────────────────────────────────
 
 def combinada(
@@ -83,6 +101,7 @@ def combinada(
     classes: Optional[list[int]] = None,
     assuntos: Optional[list[int]] = None,
     orgaos: Optional[list[int]] = None,
+    municipios: Optional[list[int]] = None,
     date_gte: Optional[str] = None,
     date_lt: Optional[str] = None,
 ) -> dict:
@@ -103,6 +122,9 @@ def combinada(
 
     if orgaos:
         must.append({"terms": {"orgaoJulgador.codigo": orgaos}})
+
+    if municipios:
+        must.append({"terms": {"orgaoJulgador.codigoMunicipioIBGE": municipios}})
 
     if not must:
         raise ValueError("combinada() exige pelo menos um filtro.")

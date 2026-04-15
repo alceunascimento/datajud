@@ -22,6 +22,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from typing import Callable
 
 import ingestor
+import magistrados as datajud_magistrados
 import parser as datajud_parser
 import query as Q
 import tpu as datajud_tpu
@@ -86,6 +87,7 @@ class App(tk.Tk):
         self._tab_classe    = self._build_tab_classe()
         self._tab_assunto   = self._build_tab_assunto()
         self._tab_orgao     = self._build_tab_orgao()
+        self._tab_municipio = self._build_tab_municipio()
         self._tab_combinada = self._build_tab_combinada()
 
         # coluna direita: tribunais + datas
@@ -117,6 +119,7 @@ class App(tk.Tk):
         btn_frame2 = ttk.Frame(main, padding=(0, 3))
         btn_frame2.pack(fill=tk.X)
         ttk.Button(btn_frame2, text="⬇ BAIXAR TPU COMPLETA", command=self._baixar_tpu_completa, width=24).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_frame2, text="👨‍⚖ MAGISTRADOS TJPR",  command=self._baixar_magistrados_tjpr, width=22).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_frame2, text="🗑 LIMPAR LOG",          command=self._limpar_log,          width=16).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_frame2, text="📂 Abrir data/",         command=self._abrir_data,          width=16).pack(side=tk.LEFT, padx=4)
 
@@ -204,6 +207,23 @@ class App(tk.Tk):
         tab.columnconfigure(0, weight=1)
         return tab
 
+    def _build_tab_municipio(self) -> ttk.Frame:
+        tab = ttk.Frame(self._notebook, padding=8)
+        self._notebook.add(tab, text="  Município  ")
+
+        ttk.Label(tab, text="Código(s) IBGE do Município:").grid(row=0, column=0, sticky=tk.W)
+        self._municipio_entry = ttk.Entry(tab, width=50)
+        self._municipio_entry.grid(row=1, column=0, columnspan=2, sticky=tk.EW, pady=2)
+        ttk.Label(tab, text="Separados por vírgula. Ex: 3550308, 3304557", foreground="gray").grid(
+            row=2, column=0, columnspan=2, sticky=tk.W)
+
+        ttk.Button(tab, text="Carregar CSV...", command=lambda: self._load_csv(self._municipio_entry)).grid(
+            row=3, column=0, sticky=tk.W, pady=4)
+        ttk.Button(tab, text="🔎 Encontrar código do município",
+                   command=self._abrir_ibge_municipios).grid(row=3, column=1, sticky=tk.W, pady=4)
+        tab.columnconfigure(0, weight=1)
+        return tab
+
     def _build_tab_combinada(self) -> ttk.Frame:
         tab = ttk.Frame(self._notebook, padding=8)
         self._notebook.add(tab, text="  Combinada  ")
@@ -218,9 +238,13 @@ class App(tk.Tk):
         self._comb_classes = _row("Códigos de classe (vírgula):", 2)
         self._comb_assuntos = _row("Códigos de assunto (vírgula):", 4)
         self._comb_orgaos  = _row("Códigos de órgão julgador (vírgula):", 6)
+        self._comb_municipios = _row("Códigos IBGE de município (vírgula):", 8)
+
+        ttk.Button(tab, text="🔎 Encontrar código do município",
+                   command=self._abrir_ibge_municipios).grid(row=10, column=0, sticky=tk.W, pady=4)
 
         ttk.Label(tab, text="Preencha apenas os campos desejados.", foreground="gray").grid(
-            row=8, column=0, columnspan=2, sticky=tk.W, pady=4)
+            row=11, column=0, columnspan=2, sticky=tk.W, pady=4)
         tab.columnconfigure(0, weight=1)
         return tab
 
@@ -269,6 +293,15 @@ class App(tk.Tk):
 
         ttk.Label(date_frame, text="(vazio = sem filtro de data)", foreground="gray").grid(
             row=2, column=0, columnspan=2, sticky=tk.W)
+
+        # Page size
+        page_frame = ttk.LabelFrame(parent, text="Processos por página", padding=4)
+        page_frame.pack(fill=tk.X, pady=(8, 0))
+        self._page_size = tk.StringVar(value="1000")
+        ttk.Combobox(page_frame, textvariable=self._page_size,
+                     values=["1000", "5000", "10000"], width=10,
+                     state="readonly").pack(anchor=tk.W)
+        ttk.Label(page_frame, text="(máx. API = 10000)", foreground="gray").pack(anchor=tk.W)
 
     # ── helpers de tribunal ──────────────────────────────────────────────────
 
@@ -361,7 +394,16 @@ class App(tk.Tk):
                 return Q.por_orgao(codigos[0], date_gte=date_gte, date_lt=date_lt)
             return Q.por_orgaos(codigos, date_gte=date_gte, date_lt=date_lt)
 
-        if tab_idx == 4:  # Combinada
+        if tab_idx == 4:  # Município
+            raw = self._municipio_entry.get().strip()
+            if not raw:
+                raise ValueError("Informe ao menos um código IBGE de município.")
+            codigos = [int(c.strip()) for c in raw.split(",") if c.strip()]
+            if len(codigos) == 1:
+                return Q.por_municipio(codigos[0], date_gte=date_gte, date_lt=date_lt)
+            return Q.por_municipios(codigos, date_gte=date_gte, date_lt=date_lt)
+
+        if tab_idx == 5:  # Combinada
             def _ints(s: str) -> list[int]:
                 return [int(x.strip()) for x in s.split(",") if x.strip()]
 
@@ -373,6 +415,7 @@ class App(tk.Tk):
                 classes=_ints(self._comb_classes.get()) or None,
                 assuntos=_ints(self._comb_assuntos.get()) or None,
                 orgaos=_ints(self._comb_orgaos.get()) or None,
+                municipios=_ints(self._comb_municipios.get()) or None,
                 date_gte=date_gte,
                 date_lt=date_lt,
             )
@@ -399,6 +442,7 @@ class App(tk.Tk):
                 ingestor.coletar_multiplos(
                     tribunal_aliases=aliases,
                     query_body=query_body,
+                    page_size=int(self._page_size.get()),
                     progress_cb=lambda m: logging.info(m),
                 )
                 logging.info("Coleta finalizada. Execute PARSEAR para gerar os Parquets.")
@@ -471,6 +515,20 @@ class App(tk.Tk):
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _baixar_magistrados_tjpr(self) -> None:
+        def _run() -> None:
+            try:
+                resultado = datajud_magistrados.baixar(
+                    out_dir=PARSED_DIR,
+                    progress_cb=lambda m: logging.info(m),
+                )
+                for k, p in resultado.items():
+                    logging.info("Magistrados TJPR: %s → %s", k, p)
+            except Exception as exc:
+                logging.error("Erro ao baixar magistrados TJPR: %s", exc)
+
+        threading.Thread(target=_run, daemon=True).start()
+
     def _limpar_log(self) -> None:
         self._log_text.config(state=tk.NORMAL)
         self._log_text.delete("1.0", tk.END)
@@ -479,6 +537,10 @@ class App(tk.Tk):
     def _abrir_data(self) -> None:
         import subprocess
         subprocess.Popen(["xdg-open", str(PARSED_DIR)])
+
+    def _abrir_ibge_municipios(self) -> None:
+        import webbrowser
+        webbrowser.open("https://www.ibge.gov.br/explica/codigos-dos-municipios.php")
 
     # ── polling do log ────────────────────────────────────────────────────────
 
